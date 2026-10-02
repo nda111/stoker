@@ -1,0 +1,22 @@
+name: stoker
+channels:
+  - defaults
+dependencies:
+  - python=3.11
+  - pip
+  - pip:
+      # torch must match the local NVIDIA driver (570.x -> cu128). Conda has no
+      # matching build, so these come from the PyTorch wheel index. Change this
+      # URL if the driver differs.
+      - --extra-index-url https://download.pytorch.org/whl/cu128
+      - torch==2.11.0
+      - pytorch-ignite==0.5.5
+      - rich==15.0.0
+      - PyYAML==6.0.3
+      - numpy==2.4.6
+      - typing_extensions==4.16.0
+      # Optional, for ConfigMixin.to_omegaconf
+      - omegaconf==2.3.1
+      # Examples only
+      - torchvision==0.26.0
+      - timm==1.0.30

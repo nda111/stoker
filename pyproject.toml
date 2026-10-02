@@ -1,0 +1,51 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "stoker"
+version = "0.1.0"
+description = "Scaffolding for pytorch-ignite training runs"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [
+    { name = "Geunhyeok Yu", email = "geunhyeok@khu.ac.kr" },
+]
+keywords = [
+    "pytorch",
+    "pytorch-ignite",
+    "training",
+    "configuration",
+    "experiment-tracking",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Typing :: Typed",
+]
+dependencies = [
+    "torch",
+    "pytorch-ignite>=0.5",
+    "rich>=13",
+    "pyyaml",
+    "numpy",
+    "typing_extensions>=4.4",
+]
+
+[project.optional-dependencies]
+omegaconf = ["omegaconf"]
+
+[project.urls]
+Homepage = "https://github.com/nda111/stoker"
+Repository = "https://github.com/nda111/stoker"
+
+[tool.setuptools.packages.find]
+include = ["stoker*"]
