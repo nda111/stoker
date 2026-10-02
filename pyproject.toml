@@ -42,6 +42,7 @@ dependencies = [
 
 [project.optional-dependencies]
 omegaconf = ["omegaconf"]
+test = ["pytest>=8"]
 
 [project.urls]
 Homepage = "https://github.com/nda111/stoker"
@@ -49,3 +50,10 @@ Repository = "https://github.com/nda111/stoker"
 
 [tool.setuptools.packages.find]
 include = ["stoker*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+filterwarnings = [
+    # torch warns about its own deprecated internals on import.
+    "ignore::DeprecationWarning:torch.*",
+]

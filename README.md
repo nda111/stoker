@@ -196,6 +196,18 @@ Importing `stoker.tracking.config_logger` registers a representer on
 `yaml.SafeDumper` so that a `torch.device` dumps as a string. That is a
 process wide change to PyYAML.
 
+## Tests
+
+```bash
+pip install -e '.[test]'
+pytest
+```
+
+They cover the pure parts, which is most of the public surface: annotation
+handling and the config file layer, the metric schema and its tables, the
+schedule's shape, the experiment layout and reopening, and the two file
+loggers. The distributed paths need more than one process and are not covered.
+
 ## Documentation
 
 Every public name has a docstring, so the library documents itself:

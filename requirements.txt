@@ -26,3 +26,6 @@ omegaconf==2.3.1
 # Examples only
 torchvision==0.26.0
 timm==1.0.30
+
+# Tests
+pytest==9.1.1
