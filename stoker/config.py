@@ -38,6 +38,20 @@ field of config type contributes its own fields under a dotted prefix, so
 only the leaf name is hyphenated; the prefix keeps its underscores. Nesting may
 go to any depth.
 
+Defaults can come from a YAML file, named by ``--config``, whose nesting
+mirrors the class:
+
+    python -m train --config runs/experiment/20260102_143000/config.yaml \
+        --epochs 200
+
+Precedence runs command line, then file, then the defaults in the class. A
+value the file supplies also stops being required, so a field with no default
+can be satisfied by the file alone. Since the file format is what
+:meth:`ConfigMixin.to_dict` produces, the ``config.yaml`` that
+:class:`~stoker.tracking.ConfigLogger` writes for a run reads back as is,
+which is how a run is repeated with one argument changed. A key the class does
+not declare is an error rather than being ignored.
+
 Two rules are worth stating because breaking them fails quietly rather than
 loudly. A config class must inherit :class:`ConfigMixin`, since that is how a
 nested field is recognised as a config at all; a nested class that omits the
@@ -58,6 +72,7 @@ import sys
 import types
 
 from abc import ABC
+from collections.abc import Mapping
 from dataclasses import (
     MISSING,
     asdict,
@@ -67,6 +82,7 @@ from dataclasses import (
 )
 from enum import Enum
 from io import StringIO
+from pathlib import Path
 from typing import (
     Annotated,
     Any,
@@ -97,6 +113,142 @@ except ImportError:
 
 
 _T_CONFIG = TypeVar('_T_CONFIG')
+
+_CONFIG_DEST = '_config_file'
+
+
+# ========================================================
+# Config file
+# ========================================================
+
+def _flatten_config_file(data, prefix=''):
+    """Nested mapping to the dotted keys the parser uses as dests."""
+    flat = {}
+
+    for key, value in data.items():
+        if not isinstance(key, str):
+            raise TypeError(
+                f'Config file keys must be str, '
+                f'got {type(key).__name__}.'
+            )
+
+        dotted = f'{prefix}{key}'
+
+        if isinstance(value, Mapping):
+            flat.update(
+                _flatten_config_file(
+                    value,
+                    f'{dotted}.',
+                )
+            )
+
+        else:
+            flat[dotted] = value
+
+    return flat
+
+
+def _read_config_file(path):
+    try:
+        import yaml
+    except ImportError as e:
+        raise ImportError(
+            'Reading a config file requires the `pyyaml` package.'
+        ) from e
+
+    file = Path(path)
+
+    if not file.is_file():
+        raise FileNotFoundError(
+            f'Config file not found: {file}'
+        )
+
+    with file.open() as f:
+        data = yaml.safe_load(f)
+
+    if data is None:
+        return {}
+
+    if not isinstance(data, Mapping):
+        raise TypeError(
+            f'Config file must hold a mapping, '
+            f'got {type(data).__name__}: {file}'
+        )
+
+    return _flatten_config_file(data)
+
+
+def _preload_config_file(parser, args):
+    """Find the config flag in argv and fold the file into the defaults.
+
+    Runs before the real parse, using a throwaway parser that knows only the
+    config flag, so that a file can satisfy arguments the class declares as
+    required.
+    """
+    flags = [
+        flag
+        for action in parser._actions
+        if action.dest == _CONFIG_DEST
+        for flag in action.option_strings
+    ]
+
+    if not flags:
+        return None
+
+    probe = argparse.ArgumentParser(add_help=False)
+    probe.add_argument(
+        *flags,
+        dest=_CONFIG_DEST,
+        default=None,
+    )
+
+    known, _ = probe.parse_known_args(args)
+    path = getattr(known, _CONFIG_DEST)
+
+    if path is None:
+        return None
+
+    return _apply_config_file(parser, path)
+
+
+def _apply_config_file(parser, path):
+    """Make the file's values the parser's defaults.
+
+    Anything the file supplies stops being required, so a field with no default
+    in the class can be satisfied by the file instead of the command line. The
+    command line still wins, because argparse overwrites defaults with what it
+    parses.
+    """
+    values = _read_config_file(path)
+
+    actions = {
+        action.dest: action
+        for action in parser._actions
+        if action.dest not in (argparse.SUPPRESS, _CONFIG_DEST)
+    }
+
+    unknown = sorted(set(values) - set(actions))
+
+    if unknown:
+        raise KeyError(
+            f'Unknown keys in {path}: {unknown}. '
+            f'Known keys: {sorted(actions)}.'
+        )
+
+    for dest, value in values.items():
+        action = actions[dest]
+
+        if action.option_strings:
+            action.required = False
+
+        elif action.nargs is None:
+            # A positional cannot be made optional by clearing required, so
+            # let it accept zero arguments and fall back to the default.
+            action.nargs = '?'
+
+        action.default = value
+
+    return values
 
 
 # ========================================================
@@ -272,6 +424,7 @@ class ConfigMixin(ABC):
     def parser(
         cls,
         *args,
+        config_flag: str | None = '--config',
         **kwargs,
     ) -> argparse.ArgumentParser:
         """Build the parser for this config without running it.
@@ -281,6 +434,9 @@ class ConfigMixin(ABC):
 
         Args:
             *args: Passed to :class:`~argparse.ArgumentParser`.
+            config_flag: Flag that names a YAML file of defaults. Pass None to
+                leave it out, for instance when the surrounding program already
+                defines a flag by that name.
             **kwargs: Passed to :class:`~argparse.ArgumentParser`, overriding
                 the ``prog``, ``description`` and ``epilog`` given to
                 :func:`argconfig`.
@@ -306,6 +462,16 @@ class ConfigMixin(ABC):
             **parser_kwargs,
         )
 
+        if config_flag:
+            parser.add_argument(
+                config_flag,
+                dest=_CONFIG_DEST,
+                metavar='PATH',
+                default=None,
+                help='read defaults from a YAML file; '
+                     'command line arguments override it',
+            )
+
         _add_config_arguments(
             parser,
             cls,
@@ -327,10 +493,14 @@ class ConfigMixin(ABC):
 
             config = Config.parse_args()
 
+        A ``--config path.yaml`` on the command line supplies defaults, which
+        the rest of the command line then overrides.
+
         Args:
             args: Argument list. Defaults to ``sys.argv[1:]``.
             parser_args: Positional arguments for :meth:`parser`.
-            parser_kwargs: Keyword arguments for :meth:`parser`.
+            parser_kwargs: Keyword arguments for :meth:`parser`, such as
+                ``config_flag``.
 
         Returns:
             An instance of this class, with nested configs built as instances
@@ -338,6 +508,11 @@ class ConfigMixin(ABC):
 
         Raises:
             SystemExit: On a parse error or ``--help``, as argparse does.
+            FileNotFoundError: If the named config file does not exist.
+            TypeError: If the config file does not hold a mapping.
+            KeyError: If the config file holds keys this class does not
+                declare. The message lists both the unknown and the known
+                keys.
         """
         if parser_kwargs is None:
             parser_kwargs = {}
@@ -346,6 +521,8 @@ class ConfigMixin(ABC):
             *parser_args,
             **parser_kwargs,
         )
+
+        _preload_config_file(parser, args)
 
         namespace = parser.parse_args(args)
 
@@ -383,6 +560,8 @@ class ConfigMixin(ABC):
             *parser_args,
             **parser_kwargs,
         )
+
+        _preload_config_file(parser, args)
 
         namespace, unknown = (
             parser.parse_known_args(args)
