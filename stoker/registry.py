@@ -72,7 +72,9 @@ class Registry(Generic[_T_REGISTERED_OBJECT]):
             MODELS.register(timm_resnet18, 'resnet18_timm')
 
         Either form returns the object unchanged, so decorating does not wrap
-        or alter what it is applied to.
+        or alter what it is applied to. Which form you get depends on how many
+        arguments you pass, not on their types, so a string can be registered
+        as a value.
 
         Args:
             obj_or_name: The name, for the decorator form, or the object to
@@ -90,7 +92,13 @@ class Registry(Generic[_T_REGISTERED_OBJECT]):
             TypeError: If an object was given with no name.
             KeyError: If the name is taken and ``overwrite`` is false.
         """
-        if isinstance(obj_or_name, str):
+        if name is None:
+            # One argument means the decorator form, where that argument is the
+            # name. Deciding on the argument count rather than on its type is
+            # what lets a string be registered as a value.
+            if not isinstance(obj_or_name, str):
+                raise TypeError('name is required')
+
             def decorator(
                 obj: _T_REGISTERED_OBJECT,
             ) -> _T_REGISTERED_OBJECT:
@@ -101,9 +109,6 @@ class Registry(Generic[_T_REGISTERED_OBJECT]):
                 )
 
             return decorator
-
-        if name is None:
-            raise TypeError('name is required')
 
         return self._register(
             obj_or_name,

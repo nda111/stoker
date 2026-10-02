@@ -54,6 +54,7 @@ class Experiment:
             else None
         )
         self._run_id = idist.broadcast(run_id, src=0)
+        self._opened = False
         self._resume_index = 0
 
         self.check_existence()
@@ -112,6 +113,7 @@ class Experiment:
         self = cls.__new__(cls)
         self.name = name
         self.root = Path(root)
+        self._opened = True
 
         resolved = (
             self._resolve_run_id(run_id)
@@ -224,8 +226,12 @@ class Experiment:
 
     @property
     def resumed(self) -> bool:
-        """Whether this came from :meth:`open` on a run that had been started."""
-        return self._resume_index > 0
+        """Whether this came from :meth:`open` rather than from the constructor.
+
+        True for every reopened run, including one that wrote no config, so a
+        script can use it to decide whether to look for a checkpoint.
+        """
+        return self._opened
 
     @property
     def metrics(self) -> Path:

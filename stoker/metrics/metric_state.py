@@ -245,9 +245,11 @@ class MetricState(Serializable):
         self.validation = MetricGroup(validation)
         self.testing = MetricGroup(testing)
 
-        # The initial structure defines the schema.
+        # The initial structure defines the schema. Declaration order is kept,
+        # so that the State table lists metrics the way they were declared
+        # rather than in whatever order a set happens to iterate.
         self._schema = {
-            key: set(getattr(self, key))
+            key: dict.fromkeys(getattr(self, key))
             for key in self._group_keys
         }
 
@@ -297,10 +299,9 @@ class MetricState(Serializable):
         Raises:
             TypeError: If ``epoch`` is not an :class:`int`, or a group is
                 neither a :class:`~collections.abc.Mapping` nor ``None``.
-            ValueError: If ``epoch`` does not exceed the last one, or if
-                ``strict`` is set and a metric is missing.
-            KeyError: If a metric is not in the schema. The message gives the
-                prefixed names.
+            ValueError: If ``epoch`` does not exceed the last one.
+            KeyError: If a metric is not in the schema, or if ``strict`` is set
+                and one is missing. Either message gives the prefixed names.
 
         Note:
             Only keys are checked before anything is written. A value of an
@@ -358,7 +359,7 @@ class MetricState(Serializable):
                 f'got {type(values).__name__}.'
             )
 
-        schema = self._schema[group_name]
+        schema = self._schema[group_name].keys()
         provided = set(values)
 
         unexpected = provided - schema
@@ -925,9 +926,11 @@ class MetricState(Serializable):
     def state_dict(self) -> OrderedDict:
         """Export the history for checkpointing.
 
-        Empty groups and an empty :attr:`epoch` are omitted, so a fresh
-        instance exports an empty mapping. The result is a deep copy, so it is
-        a snapshot that later :meth:`update` calls do not alter.
+        A group that declares no metrics at all is omitted, as is an empty
+        :attr:`epoch`, so an instance that declared nothing exports an empty
+        mapping. A declared metric is always present, even before any epoch has
+        been recorded. The result is a deep copy, so it is a snapshot that later
+        :meth:`update` calls do not alter.
         """
         state = OrderedDict()
 
@@ -961,8 +964,9 @@ class MetricState(Serializable):
             TypeError: If ``state_dict`` is not a
                 :class:`~collections.abc.Mapping`, or a value has the wrong
                 type.
-            ValueError: If it holds unexpected keys, or if the restored
-                historical lists do not all have one entry per epoch.
+            KeyError: If it holds keys outside the schema.
+            ValueError: If the restored historical lists do not all have one
+                entry per epoch.
         """
         if not isinstance(state_dict, Mapping):
             raise TypeError(
@@ -1008,7 +1012,7 @@ class MetricState(Serializable):
                     f'got {type(value).__name__}.'
                 )
 
-            schema = self._schema[key]
+            schema = self._schema[key].keys()
 
             unexpected = set(value) - schema
 
