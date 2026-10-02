@@ -40,6 +40,16 @@ class Config(ConfigMixin):
     device: torch.device = torch.device('cuda:0')
     seed: int | None = None
 
+    resume: Annotated[
+        str | None,
+        Argument(
+            '--resume',
+            metavar='RUN_ID',
+            nargs='?',
+            const='latest',
+        ),
+    ] = None
+
     epochs: int = 100
     batch_size: int = 512
 
@@ -72,8 +82,10 @@ class Config(ConfigMixin):
 config = Config.parse_args()
 config.dump()
 
-experiment = Experiment(
-    name=config.name,
+experiment = (
+    Experiment.open(config.name, run_id=config.resume)
+    if config.resume
+    else Experiment(name=config.name)
 )
 
 if isinstance(config.seed, int):
@@ -281,6 +293,29 @@ best_ckpt = Checkpoint(
     score_name='val_top1',
     n_saved=3,
 )
+
+# Resume
+if experiment.resumed:
+    checkpoint = experiment.latest_checkpoints / 'last'
+
+    if checkpoint.is_file():
+        Checkpoint.load_objects(
+            to_load=ckpt_components,
+            checkpoint=torch.load(
+                checkpoint,
+                map_location=config.device,
+                weights_only=False,
+            ),
+        )
+        progress_bar.print(
+            f'Resumed {experiment.run_id} from epoch {trainer.state.epoch}.'
+        )
+
+    else:
+        progress_bar.print(
+            f'No checkpoint in {experiment.latest_checkpoints}, '
+            f'starting from scratch.'
+        )
 
 # ========================================================
 # Attachments
