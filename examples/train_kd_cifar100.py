@@ -11,7 +11,7 @@ from timm.models.resnet import ResNet
 from ignite import utils as iutils
 from ignite import distributed as idist
 from ignite.engine import Engine, Events
-from ignite.metrics import Accuracy, Loss, TopKCategoricalAccuracy
+from ignite.metrics import Accuracy, TopKCategoricalAccuracy
 from ignite.handlers import Checkpoint, DiskSaver
 
 from stoker.config import argconfig, ConfigMixin, Annotated, Argument, default
@@ -55,7 +55,8 @@ class Config(ConfigMixin):
     epochs: int = 100
     batch_size: int = 512
 
-    model: str = 'resnet18'
+    student: str = 'resnet18'
+    teacher: str = 'resnet50.tv_in1k'
 
     use_amp: Annotated[
         bool,
@@ -80,6 +81,27 @@ class Config(ConfigMixin):
 
     scheduler: SchedulerConfig = default()
 
+    @argconfig
+    class DistillationConfig(ConfigMixin):
+        layers: Annotated[
+            list[int],
+            Argument(
+                '--layers',
+                type=int,
+                nargs='*',
+            )
+        ] = None  # None for no layers, [-1] for all layers.
+        logits: Annotated[
+            bool,
+            Argument(
+                '--logits',
+                action='store_true',
+            )
+        ] = False
+        weight: float = 0.05
+        temperature: float = 0.5
+
+    distill: DistillationConfig = default()
 
 config = Config.parse_args()
 config.dump()
@@ -137,13 +159,13 @@ valid_loader = idist.auto_dataloader(
 # Model & Optimizer
 # ========================================================
 
-model = timm.create_model(
-    config.model,
+student = timm.create_model(
+    config.student,
     pretrained=False,
     num_classes=100,
 )
-if isinstance(model, ResNet):
-    model.conv1 = nn.Conv2d(
+if isinstance(student, ResNet):
+    student.conv1 = nn.Conv2d(
         3,
         64,
         kernel_size=3,
@@ -151,11 +173,17 @@ if isinstance(model, ResNet):
         padding=1,
         bias=False,
     )
-    model.maxpool = nn.Identity()
-model = idist.auto_model(model)
+    student.maxpool = nn.Identity()
+student = idist.auto_model(student)
+teacher = timm.create_model(
+    config.teacher,
+    pretrained=False,
+    num_classes=100,
+)
+teacher = idist.auto_model(teacher).eval().requires_grad_(False)
 
 optimizer = optim.AdamW(
-    model.parameters(),
+    student.parameters(),
     lr=0,
     weight_decay=config.optimizer.weight_decay,
 )
@@ -178,18 +206,22 @@ scaler = torch.amp.GradScaler(config.device.type, enabled=config.use_amp)
 
 progress_bar = RichProgressBar.Factory.create_fancy_instance()
 
-train_loss_meter = AverageMeter()
-valid_loss_meter = Loss(nn.functional.cross_entropy)
-top1_meter = Accuracy()
-top5_meter = TopKCategoricalAccuracy(k=5)
+train_loss_ce_meter = AverageMeter(output_transform=lambda y: y['ce'])
+train_loss_kd_meter = AverageMeter(output_transform=lambda y: y['kd'])
+valid_loss_ce_meter = AverageMeter(output_transform=lambda y: y[2]['ce'])
+valid_loss_kd_meter = AverageMeter(output_transform=lambda y: y[2]['kd'])
+top1_meter = Accuracy(output_transform=lambda y: y[:2])
+top5_meter = TopKCategoricalAccuracy(k=5, output_transform=lambda y: y[:2])
 
 metric_state = MetricState(
     training=dict(
         lr=[],
-        loss=[],
+        loss_ce=[],
+        loss_kd=[],
     ),
     validation=dict(
-        loss=[],
+        loss_ce=[],
+        loss_kd=[],
         top1=[],
         top5=[],
     )
@@ -201,18 +233,31 @@ metric_state = MetricState(
 
 @Engine
 def trainer(engine: Engine, batch: tuple[torch.Tensor, ...]):
-    model.train()
+    student.train()
+    T = config.distill.temperature
+    weight_kd = config.distill.weight
+    weight_ce = 1 - weight_kd
 
     x, y = batch
     x = x.to(config.device, non_blocking=True)
     y = y.to(config.device, non_blocking=True)  # (B, C) 
 
     with torch.autocast(device_type=config.device.type, enabled=config.use_amp):
-        y_pred = model(x)
-        loss_vector = nn.functional.cross_entropy(
-            y_pred, y, reduction='none',
+        with torch.no_grad():
+            y_teacher: torch.Tensor = teacher(x)
+            sm_teacher = (y_teacher / T).log_softmax(dim=-1)
+        y_student: torch.Tensor = student(x)
+        sm_student = (y_student / T).log_softmax(dim=-1)
+        
+        loss_ce_vector = nn.functional.cross_entropy(
+            y_student, y, reduction='none',
         )  # (B,)
-        loss = loss_vector.mean()
+        loss_kd_vector = nn.functional.kl_div(
+            sm_student, sm_teacher, reduction='none', log_target=True,
+        ).sum(dim=-1) * (T ** 2)  # (B,)
+        loss_ce = loss_ce_vector.mean()
+        loss_kd = loss_kd_vector.mean()
+        loss = loss_ce * weight_ce + loss_kd * weight_kd
 
     optimizer.zero_grad()
     scaler.scale(loss).backward()
@@ -220,24 +265,42 @@ def trainer(engine: Engine, batch: tuple[torch.Tensor, ...]):
     scaler.update()
     
     progress_bar.set_postfix({
-        'loss': f'{loss:.4f}',
+        'loss_ce': f'{loss_ce:.4f}',
+        'loss_kd': f'{loss_kd:.4f}',
     }, where='training')
 
-    return loss.detach()
+    return {
+        'ce': loss_ce_vector.detach(),
+        'kd': loss_kd_vector.detach(),
+    }
 
 @Engine
 @torch.no_grad()
 def evaluator(engine: Engine, batch: tuple[torch.Tensor, ...]):
-    model.eval()
+    student.eval()
+    T = config.distill.temperature
 
     x, y = batch
     x = x.to(config.device, non_blocking=True)
     y = y.to(config.device, non_blocking=True)
 
     with torch.autocast(device_type=config.device.type, enabled=config.use_amp):
-        y_pred = model(x)
+        y_student: torch.Tensor = student(x)
+        y_teacher: torch.Tensor = teacher(x)
+        sm_student = (y_student / T).log_softmax(dim=-1)
+        sm_teacher = (y_teacher / T).log_softmax(dim=-1)
+        
+        loss_ce_vector = nn.functional.cross_entropy(
+            y_student, y, reduction='none',
+        )  # (B,)
+        loss_kd_vector = nn.functional.kl_div(
+            sm_student, sm_teacher, reduction='none', log_target=True,
+        ).sum(dim=-1) * (T ** 2)  # (B,)
 
-    return y_pred, y
+    return y_student, y, {
+        'ce': loss_ce_vector,
+        'kd': loss_kd_vector,
+    }
 
 # ========================================================
 # Logging & Checkpointing
@@ -263,7 +326,7 @@ yaml_logger = YamlLogger(
 
 # Checkpoints
 ckpt_components = dict(
-    model=model,
+    model=student,
     optimizer=optimizer,
     scheduler=scheduler,
     trainer=trainer,
@@ -325,16 +388,19 @@ if experiment.resumed:
     else:
         progress_bar.print(
             f'No checkpoint in {experiment.latest_checkpoints}, '
-            f'starting from scratch.'
+            f'quitting training.'
         )
+        exit()
 
 # ========================================================
 # Attachments
 # ========================================================
 
 # Metrics
-train_loss_meter.attach(trainer, 'loss')
-valid_loss_meter.attach(evaluator, 'loss')
+train_loss_ce_meter.attach(trainer, 'loss_ce')
+train_loss_kd_meter.attach(trainer, 'loss_kd')
+valid_loss_ce_meter.attach(evaluator, 'loss_ce')
+valid_loss_kd_meter.attach(evaluator, 'loss_kd')
 top1_meter.attach(evaluator, 'top1')
 top5_meter.attach(evaluator, 'top5')
 
